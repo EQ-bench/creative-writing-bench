@@ -4,6 +4,7 @@ from nltk.corpus import cmudict
 import string
 import numpy as np
 from scipy.stats import norm
+from pathlib import Path
 
 # Load CMU Pronouncing Dictionary
 pronunciation_dict = cmudict.dict()
@@ -457,77 +458,239 @@ if False:
 stop_words = set(stopwords.words('english'))
 punctuation_set = set(string.punctuation) # Use a different name than the module
 
+
+# ── helper ────────────────────────────────────────────────────────────────────
+def _load_human_ngram_freqs(human_profile_path: Path, n: int) -> Dict[str, float]:
+    """
+    Load the pre-computed human baseline n-gram distribution and return a
+    normalised frequency map (freq = count / total_counts).
+    """
+    with open(human_profile_path, "r", encoding="utf-8") as f:
+        hp = json.load(f)["human-authored"]
+
+    key_lookup = {2: "top_bigrams", 3: "top_trigrams"}
+    key = key_lookup.get(n)
+    if key is None or key not in hp:
+        return {}
+
+    items = hp[key]
+    total = sum(int(it["frequency"]) for it in items if "frequency" in it)
+    if total == 0:
+        return {}
+
+    freqs: Dict[str, float] = {}
+    for it in items:
+        try:
+            ngram_str = " ".join(tok.lower() for tok in word_tokenize(it["ngram"]) if tok.isalpha())
+            freqs[ngram_str] = int(it["frequency"]) / total
+        except Exception:
+            continue
+    return freqs
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
 def get_multi_prompt_ngrams(
     prompts_data: Dict[str, List[str]],
     n: int,
     top_k: int = 20,
-    min_prompt_ids: int = 2
+    min_prompt_ids: int = 2,
+    human_profile_path: Path = Path("data/human_writing_profile.json"),
 ) -> List[Tuple[Tuple[str, ...], int]]:
     """
-    Extracts the top_k N-grams of size n that appear across at least
-    min_prompt_ids unique prompts within the provided texts.
+    Extract n-grams that (i) appear in at least `min_prompt_ids` unique prompts and
+    (ii) are the top-k most over-used relative to the human baseline.
 
-    Args:
-        prompts_data: Dict mapping prompt_id to a list of text responses.
-                      Example: { 'prompt1': ['text a', 'text b'], 'prompt2': ['text c'] }
-        n: The size of the N-grams (e.g., 2 for bigrams, 3 for trigrams).
-        top_k: The maximum number of top N-grams to return.
-        min_prompt_ids: The minimum number of unique prompt IDs an N-gram
-                        must appear in to be considered.
-
-    Returns:
-        A list of tuples, where each tuple contains the N-gram (as a tuple of strings)
-        and its total frequency, sorted by frequency descending.
-        Returns an empty list if no N-grams meet the criteria.
+    Returns
+    -------
+    List[Tuple[Tuple[str, ...], int]]
+        Each tuple is (ngram_as_tuple, raw_incidence_count_in_model_texts),
+        sorted by descending count.
     """
-    ngram_counts = Counter()
-    ngram_prompt_map = defaultdict(set)
+    global stop_words
+    if stop_words is None:
+        stop_words = set(stopwords.words("english"))
 
-    # Check if there are enough unique prompts to even potentially meet the criteria
-    if len(prompts_data) < min_prompt_ids:
-        return []
+    # 1. collect counts + prompt coverage
+    ngram_counts: Counter = Counter()
+    ngram_prompt_map: defaultdict = defaultdict(set)
 
-    print(f"      Extracting {n}-grams...", end="") # Progress indicator within model processing
-    total_processed_texts = 0
-    # 1. Iterate through texts, extract cleaned n-grams, count, and map to prompts
     for prompt_id, texts in prompts_data.items():
         for text in texts:
             if not isinstance(text, str) or not text.strip():
                 continue
-            total_processed_texts += 1
-            # Tokenize and clean
             tokens = [
-                word.lower() for word in word_tokenize(text)
-                if word.isalpha() and word.lower() not in stop_words # Keep alpha, remove stops
+                t.lower() for t in word_tokenize(text)
+                if t.isalpha() and t.lower() not in stop_words
             ]
-
             if len(tokens) < n:
-                continue # Not enough tokens to form an n-gram
+                continue
+            for ng in nltk_ngrams(tokens, n):
+                ngram_counts[ng] += 1
+                ngram_prompt_map[ng].add(prompt_id)
 
-            # Generate n-grams
-            current_ngrams = list(nltk_ngrams(tokens, n))
-
-            # Update counts and prompt map
-            for ngram in current_ngrams:
-                ngram_counts[ngram] += 1
-                ngram_prompt_map[ngram].add(prompt_id)
-
-    print(f" Done ({total_processed_texts} texts).") # Finish progress indicator
-
-    # 2. Filter n-grams based on min_prompt_ids
-    filtered_ngrams = {
-        ngram: count for ngram, count in ngram_counts.items()
-        if len(ngram_prompt_map[ngram]) >= min_prompt_ids
+    # 2. filter by prompt coverage
+    filtered_counts = {
+        ng: cnt for ng, cnt in ngram_counts.items()
+        if len(ngram_prompt_map[ng]) >= min_prompt_ids
     }
-
-    if not filtered_ngrams:
+    if not filtered_counts:
         return []
 
-    # 3. Sort the filtered n-grams by frequency and return top_k
-    # Create a list of (ngram, frequency) tuples from the filtered dict
-    sorted_filtered_ngrams = sorted(filtered_ngrams.items(), key=lambda item: item[1], reverse=True)
+    # 3. model frequencies (string-keyed for easy comparison)
+    counts_str = {" ".join(ng): cnt for ng, cnt in filtered_counts.items()}
+    total_model = sum(counts_str.values())
+    model_freqs = {k: v / total_model for k, v in counts_str.items()}
 
-    return sorted_filtered_ngrams[:top_k]
+    # 4. human baseline frequencies
+    human_freqs = _load_human_ngram_freqs(human_profile_path, n)
+    if not human_freqs:
+        # no baseline: keep most frequent n-grams by raw count
+        top_ngs = sorted(filtered_counts.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+        return [(ng, cnt) for ng, cnt in top_ngs]
+
+    # 5. over-use ratios
+    epsilon = 1e-12
+    overuse_ratio = {
+        ng_str: model_freqs[ng_str] / (human_freqs.get(ng_str, 0.0) + epsilon)
+        for ng_str in model_freqs
+    }
+
+    # 6. choose top-k by ratio
+    top_by_ratio = sorted(overuse_ratio.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+
+    # 7. build result list with raw counts
+    results: List[Tuple[Tuple[str, ...], int]] = []
+    for ng_str, _ in top_by_ratio:
+        ng_tuple = tuple(ng_str.split())
+        count = filtered_counts.get(ng_tuple, 0)
+        results.append((ng_tuple, count))
+
+    # 8. final sort by incidence count
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+
+
+# ── NEW helper ────────────────────────────────────────────────────────────────
+def has_sentence_end_in_the_middle(phrase: str) -> bool:
+    """
+    Returns True if there is . ? or ! in the middle of 'phrase'
+    (not counting the very last character).
+    """
+    s = phrase.strip()
+    if len(s) <= 2:
+        return False
+    for c in ".?!":
+        if c in s[:-1]:  # check everything except the last character
+            return True
+    return False
+
+def _process_one_text_for_substrings_multi(
+    text: str,
+    ngram_sets_by_len: Dict[int, Set[Tuple[str, ...]]],
+    stop_words_set: Set[str],
+) -> Counter:
+    """
+    Same idea as the old process_one_text_for_substrings() but supports
+    *multiple* n-values in a single pass.  Returns Counter{exact_phrase: count}.
+    """
+    local_counter = Counter()
+    if not isinstance(text, str) or not text.strip():
+        return local_counter
+
+    # 1. naive tokenisation + offsets
+    tokens_with_spans = []
+    offset = 0
+    for tk in word_tokenize(text):
+        idx = text.find(tk, offset)
+        if idx == -1:
+            continue
+        tokens_with_spans.append((tk, idx, idx + len(tk)))
+        offset = idx + len(tk)
+
+    # 2. build cleaned tokens & offset map
+    cleaned_tokens, char_map = [], []
+    for tk, st, en in tokens_with_spans:
+        lt = tk.lower()
+        if lt.isalpha() and lt not in stop_words_set:
+            cleaned_tokens.append(lt)
+            char_map.append((st, en))
+
+    # 3. slide over each requested n
+    clen = len(cleaned_tokens)
+    for n, ngram_set in ngram_sets_by_len.items():
+        if clen < n:
+            continue
+        limit = clen - n + 1
+        for i in range(limit):
+            cand = tuple(cleaned_tokens[i : i + n])
+            if cand in ngram_set:
+                st = char_map[i][0]
+                en = char_map[i + n - 1][1]
+                local_counter[text[st:en]] += 1
+    return local_counter
+
+from functools import partial
+from multiprocessing import Pool
+
+# ── NEW main ──────────────────────────────────────────────────────────────────
+def extract_slop_phrases(
+    texts: List[str],
+    ngram_list: List[Tuple[Tuple[str, ...], int]],
+    top_k_ngrams: int = 1000,          # keep this for parity
+    top_phrases_to_save: int = 10_000,
+    chunksize: int = 50,
+):
+    """
+    Pull the exact over-used phrases (any n-gram length) from raw texts.
+
+    Parameters
+    ----------
+    texts : list[str]
+        The corpus you want to mine.
+    ngram_list : list[(tuple, count)]
+        Output of get_multi_prompt_ngrams() (can mix 2-grams, 3-grams, …).
+    """
+
+
+    if not ngram_list:
+        return
+
+    # 1. limit to top-k by *relative-freq ranking* already present in ngram_list
+    ngram_list = ngram_list[:top_k_ngrams]
+
+    # 2. bucket by n
+    ngram_sets_by_len: Dict[int, Set[Tuple[str, ...]]] = defaultdict(set)
+    for ng, _cnt in ngram_list:
+        ngram_sets_by_len[len(ng)].add(tuple(tok.lower() for tok in ng))
+
+    # 3. MP extraction
+    process_func = partial(
+        _process_one_text_for_substrings_multi,
+        ngram_sets_by_len=ngram_sets_by_len,
+        stop_words_set=stop_words,
+    )
+    num_procs = min(os.cpu_count() or 1, 12)
+    with Pool(processes=num_procs) as p:
+        counters = list(
+            tqdm(p.imap_unordered(process_func, texts, chunksize=chunksize),
+                 total=len(texts),
+                 desc="substring extraction")
+        )
+
+    combined = Counter()
+    for c in counters:
+        combined.update(c)
+
+    # 4. punctuation filter
+    filtered = Counter(
+        {ph: c for ph, c in combined.items() if not has_sentence_end_in_the_middle(ph)}
+    )
+
+    # 5. save
+    top_phrases = filtered.most_common(top_phrases_to_save)
+    return top_phrases
+
 
 
 

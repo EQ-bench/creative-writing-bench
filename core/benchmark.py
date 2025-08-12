@@ -309,6 +309,18 @@ def run_eq_bench_creative(
                 # Load existing task data into an object
                 try:
                     resumed_task = CreativeWritingTask.from_dict(c_data)
+                    if resumed_task.status in ("completed", "judged"):
+                        missing = any(
+                            not blk.get("judge_scores")
+                            for blk in resumed_task.results_by_modifier.values()
+                        )
+                        if missing:
+                            logging.info(
+                                f"Resetting status to 'generated' for "
+                                f"task {prompt_key} (iter {i_str}) – "
+                                "previous judge failed or incomplete."
+                            )
+                            resumed_task.status = "generated"
                     tasks_to_run.append(resumed_task)
                 except Exception as e:
                      logging.error(f"Failed to load task from dict for iter={i_str}, prompt={prompt_key}: {e}. Skipping task.", exc_info=True)

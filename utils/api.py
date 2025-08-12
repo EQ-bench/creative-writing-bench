@@ -40,11 +40,13 @@ class APIClient:
 
         logging.debug(f"Initialized {self.model_type} API client with URL: {self.base_url}")
 
-    def generate(self, model: str, prompt: str, temperature: float = 0.0, max_tokens: int = 8096, include_seed=True, min_p = 0.1) -> str:
+    def generate(self, model: str, prompt: str, temperature: float = 0.0, max_tokens: int = 8096, include_seed=True, min_p = 0.1, system=None) -> str:
         """
         Generic chat-completion style call.  We allow an optional random seed block.
         """
         messages = [{"role": "user", "content": prompt}]
+        if system:
+            messages = [{"role": "system", "content": system}] + messages
 
         # Optionally add random seed block as a system message for judging tasks.
         # This allows us to get variation between iterations without using temp > 0 which compromises judging performance.
@@ -71,14 +73,30 @@ class APIClient:
                     "temperature": temperature,
                     "max_tokens": max_tokens                    
                 }
-                if min_p != None and model != 'o3':
+                if min_p != None and model != 'o3' and self.base_url != 'https://api.openai.com/v1/chat/completions':
                     # Only use min_p for the test model (not judge).
                     # If your test model doesn't support min_p, you may need to
                     # disable this here. Alternatively you could use openrouter
                     # which will automatically omit unsupported params.
                     payload['min_p'] = min_p
+                if self.base_url == 'https://api.openai.com/v1/chat/completions':
+                    try:
+                        del payload['min_p']
+                    except:
+                        pass
+                
                 if model == 'o3':
                     # o3 has special reqs via the openai api
+                    del payload['max_tokens']
+                    payload['max_completion_tokens'] = max_tokens
+                    payload['temperature'] = 1
+                if model in ['gpt-5-2025-08-07', 'gpt-5-mini-2025-08-07', 'gpt-5-nano-2025-08-07']:
+                    payload['reasoning_effort']="minimal"
+                    del payload['max_tokens']
+                    payload['max_completion_tokens'] = max_tokens
+                    payload['temperature'] = 1
+
+                if model in ['gpt-5-chat-latest']:
                     del payload['max_tokens']
                     payload['max_completion_tokens'] = max_tokens
                     payload['temperature'] = 1
@@ -116,3 +134,7 @@ class APIClient:
             time.sleep(self.retry_delay)
 
         raise RuntimeError(f"Failed to generate text after {self.max_retries} attempts")
+
+
+
+

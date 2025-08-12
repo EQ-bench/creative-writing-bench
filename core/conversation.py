@@ -116,14 +116,27 @@ class CreativeWritingTask:
                 }
             })
 
-    def judge(self, api_clients, judge_prompt: str, creative_writing_criteria: List[str],
-          negative_criteria: List[str], runs_file=None, run_key=None):
+    def judge(
+        self,
+        api_clients,
+        judge_prompt: str,
+        creative_writing_criteria: List[str],
+        negative_criteria: List[str],
+        runs_file=None,
+        run_key=None,
+    ):
         """
         For each seed modifier, if there's a model_response and no generation failures,
-        pass it to the judge model for scoring.
+        pass it to the judge model for scoring.  The task is marked
+        *completed* only if every modifier obtained at least one numeric score.
+        Otherwise we keep the status 'generated' so it will be re-queued
+        automatically on the next run.
         """
         if self.status != "generated":
-            logging.warning(f"Cannot judge a {self.status} CreativeWritingTask (prompt_id={self.prompt_id})")
+            logging.warning(
+                f"Cannot judge a {self.status} CreativeWritingTask "
+                f"(prompt_id={self.prompt_id})"
+            )
             return
 
         judge_api = api_clients["judge"]
@@ -131,49 +144,73 @@ class CreativeWritingTask:
         from core.scoring import parse_judge_scores_creative
 
         for seed_modifier, data_block in self.results_by_modifier.items():
-            if "judge_scores" in data_block:
+            if data_block.get("judge_scores"):
                 continue
 
             # Skip judging if generation failed
             if data_block.get("generation_failed", False):
                 data_block["judge_scores"] = {}
-                data_block["raw_judge_text"] = f"[Skipping - generation error: {data_block.get('error_message', 'Unknown error')}]"
+                data_block["raw_judge_text"] = (
+                    f"[Skipping – generation error: "
+                    f"{data_block.get('error_message', 'Unknown error')}]"
+                )
                 continue
 
             model_text = data_block.get("model_response", "")
             if not model_text:
-                # Skip if no model response (shouldn't happen with new logic but just in case)
                 data_block["judge_scores"] = {}
-                data_block["raw_judge_text"] = "[Skipping - empty generation]"
+                data_block["raw_judge_text"] = "[Skipping – empty generation]"
                 continue
 
-            # Build final
             final_judge_prompt = judge_prompt.format(
                 writing_prompt=self.base_prompt,
                 test_model_response=model_text,
-                creative_writing_criteria="\n".join(["- " + c for c in creative_writing_criteria]),
-                lower_is_better_criteria=", ".join(negative_criteria)
+                creative_writing_criteria="\n".join(
+                    ["- " + c for c in creative_writing_criteria]
+                ),
+                lower_is_better_criteria=", ".join(negative_criteria),
             )
 
             try:
-                judge_resp = judge_api.generate(self.judge_model, final_judge_prompt, temperature=0.0, max_tokens=1000, include_seed=True, min_p=None)
+                judge_resp = judge_api.generate(
+                    self.judge_model,
+                    final_judge_prompt,
+                    temperature=0.0,
+                    max_tokens=1000,
+                    include_seed=True,
+                )
                 scores_dict = parse_judge_scores_creative(judge_resp)
                 data_block["judge_scores"] = scores_dict
                 data_block["raw_judge_text"] = judge_resp
             except Exception as e:
-                logging.error(f"[CreativeWritingTask] Judge error (prompt_id={self.prompt_id}, seed={seed_modifier}): {str(e)}")
+                logging.error(
+                    f"[CreativeWritingTask] Judge error "
+                    f"(prompt_id={self.prompt_id}, seed={seed_modifier}): {e}"
+                )
                 data_block["judge_scores"] = {}
-                data_block["raw_judge_text"] = f"[ERROR: {str(e)}]"
+                data_block["raw_judge_text"] = f"[ERROR: {e}]"
 
-            self.status = "completed"
-            if runs_file and run_key:
-                update_run_data(runs_file, run_key, {
+        # ---------- new status decision ----------
+        all_scored = all(
+            block.get("generation_failed")
+            or bool(block.get("judge_scores"))
+            for block in self.results_by_modifier.values()
+        )
+
+        self.status = "completed" if all_scored else "generated"
+        # -----------------------------------------
+
+        if runs_file and run_key:
+            update_run_data(
+                runs_file,
+                run_key,
+                {
                     "creative_tasks": {
-                        str(self.iteration_index): {
-                            str(self.prompt_id): self.to_dict()
-                        }
+                        str(self.iteration_index): {str(self.prompt_id): self.to_dict()}
                     }
-                })
+                },
+            )
+
 
     def to_dict(self) -> Dict[str, Any]:
         return {
