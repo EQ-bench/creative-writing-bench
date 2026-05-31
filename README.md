@@ -7,7 +7,7 @@
 The evaluation process involves several steps:
 
 1.  **Generation:** The model under test generates responses to 32 distinct writing prompts across 3 iterations (96 items total). Generation uses a temperature of 0.7 and min_p of 0.1 to encourage creativity while maintaining some consistency.
-2.  **Rubric Scoring:** Each generated piece is individually assessed by a judge model (Anthropic's Claude Sonnet 4 recommended for leaderboard parity) against a comprehensive rubric.
+2.  **Rubric Scoring:** Each generated piece is individually assessed by a judge model (Anthropic's Claude Sonnet 4.6 recommended for leaderboard parity) against a comprehensive rubric.
 3.  **Initial Elo Inference:** The aggregate rubric score is used to estimate an initial Elo rating for the model being evaluated relative to existing models.
 4.  **Pairwise Matchups (Sparse):** The model is compared against neighboring models on the leaderboard using pairwise matchups. The judge determines the better output across several criteria, assigning a score margin (using `+` symbols).
 5.  **Glicko Calculation:** Elo scores are calculated using the Glicko-2 rating system, modified to incorporate the win margin (number of `+`'s) from pairwise comparisons. This process loops until model positions stabilize.
@@ -65,7 +65,7 @@ Execute the main script with your desired parameters. For a leaderboard-comparab
 ```bash
 python3 creative_writing_bench.py \
     --test-model "your-model-provider/your-model-name" \
-    --judge-model "anthropic/claude-sonnet-4" \
+    --judge-model "claude-sonnet-4-6" \
     --runs-file "creative_bench_runs.json" \
     --creative-prompts-file "data/creative_writing_prompts_v3.json" \
     --run-id "my_model_run_1" \
@@ -77,7 +77,7 @@ python3 creative_writing_bench.py \
 **Important Arguments:**
 
 *   `--test-model`: Identifier for the model you want to evaluate.
-*   `--judge-model`: Identifier for the judge model (use `anthropic/claude-sonnet-4` for leaderboard scores).
+*   `--judge-model`: Identifier for the judge model (use `claude-sonnet-4-6` for leaderboard scores).
 *   `--runs-file`: Path to the JSON file storing run data. **Crucially, to get an Elo score comparable to the EQ-Bench leaderboard, you *must* use the `creative_bench_runs.json` file provided in this repository**, as it contains the necessary historical data for Elo calculation. Start with the one provided here. Subsequent runs will update this file.
 *   `--iterations`: Number of generation iterations per prompt (default and recommended: 3).
 *   `--run-id`: A unique prefix for this specific run attempt. Helps organize results if you run the same model multiple times.
@@ -99,7 +99,7 @@ unzip creative_bench_runs.zip
 unzip elo_results.zip
 python3 creative_writing_bench.py \
     --test-model "your-model-provider/your-model-name" \
-    --judge-model "anthropic/claude-sonnet-4" \
+    --judge-model "claude-sonnet-4-6" \
     --runs-file "creative_bench_runs.json" \
     --run-id "my_model_run_1" \
     --iterations 3
@@ -118,7 +118,7 @@ python3 creative_writing_bench.py \
 
 Evaluating creative writing is inherently subjective. This benchmark aims to provide a reliable *relative* ranking by:
 
-*   Using a judge model (Sonnet 4) known for decent literary assessment.
+*   Using a judge model (Sonnet 4.6) known for decent literary assessment.
 *   Employing pairwise comparisons for better discrimination than rubric scores alone.
 *   Choosing prompts that deliberately expose model weaknesses, creating a steeper evaluation gradient.
 *   Acknowledging and attempting to mitigate known LLM judge biases.
@@ -145,10 +145,10 @@ Biases **not** explicitly controlled for include potential judge self-bias, posi
 ## Limitations
 
 *   **Subjectivity:** Creative quality is subjective; the judge's assessment may differ from human preferences.
-*   **Judge Limitations:** Sonnet 4 is good but not infallible; it may miss nuances humans perceive.
+*   **Judge Limitations:** Sonnet 4.6 is good but not infallible; it may miss nuances humans perceive.
 *   **Not a Roleplay Eval:** The benchmark doesn't assess conversational RP skills.
 *   **English Only:** Currently evaluates English language writing only.
-*   **Cost:** Running the benchmark involves API costs (approx. $10 per model using Sonnet 4 as judge).
+*   **Cost:** Running the benchmark involves API costs (approx. $10 per model using Sonnet 4.6 as judge).
 
 **Always view benchmark scores as a guide, not absolute truth. Read the sample outputs!**
 

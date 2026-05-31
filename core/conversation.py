@@ -67,7 +67,7 @@ class CreativeWritingTask:
 """
                     system_msg = None
                     style_bias = True
-                    response = test_api.generate(self.test_model, final_prompt, temperature=0.7, max_tokens=4000, min_p=0.1, include_seed=False)
+                    response = test_api.generate(self.test_model, final_prompt, temperature=0.7, max_tokens=12000, min_p=0.1, include_seed=False)
                     
                     # Check if response is too short
                     if len(response.strip()) < 500:

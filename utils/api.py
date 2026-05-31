@@ -78,6 +78,91 @@ class APIClient:
             return ""
         return data.get("completion", "")
 
+    def _summarize_payload_for_logs(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a compact, secret-safe payload summary for debug logs."""
+        messages = payload.get("messages", [])
+        msg_roles = [msg.get("role", "?") for msg in messages if isinstance(msg, dict)]
+        msg_lengths = [
+            len(str(msg.get("content", ""))) for msg in messages if isinstance(msg, dict)
+        ]
+        summary = {
+            "model": payload.get("model"),
+            "temperature": payload.get("temperature"),
+            "max_tokens": payload.get("max_tokens"),
+            "max_completion_tokens": payload.get("max_completion_tokens"),
+            "message_count": len(messages),
+            "message_roles": msg_roles,
+            "message_lengths": msg_lengths,
+            "has_reasoning": "reasoning" in payload,
+            "has_min_p": "min_p" in payload,
+            "provider": self.provider,
+            "url": self.base_url,
+        }
+        return summary
+
+    def _extract_http_error_details(self, response: Optional[requests.Response]) -> Dict[str, Any]:
+        """Extract structured diagnostics from failed HTTP response."""
+        if response is None:
+            return {"status_code": None, "reason": None, "error": None, "body_preview": None}
+
+        details: Dict[str, Any] = {
+            "status_code": response.status_code,
+            "reason": response.reason,
+            "error": None,
+            "body_preview": None,
+        }
+        try:
+            body = response.json()
+            details["error"] = body.get("error", body)
+        except ValueError:
+            text = (response.text or "").strip()
+            details["body_preview"] = text[:1200] if text else None
+        return details
+
+    def _sanitize_messages_for_logs(self, messages: Any, max_content_chars: int = 1200) -> Any:
+        """Sanitize/trim message content for logs while preserving structure."""
+        if not isinstance(messages, list):
+            return messages
+        sanitized = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                sanitized.append(msg)
+                continue
+            cleaned = dict(msg)
+            content = cleaned.get("content")
+            if isinstance(content, str) and len(content) > max_content_chars:
+                cleaned["content"] = content[:max_content_chars] + "...<truncated>"
+            sanitized.append(cleaned)
+        return sanitized
+
+    def _full_payload_for_logs(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Return payload with large text fields trimmed for debugging."""
+        payload_copy = dict(payload)
+        if "messages" in payload_copy:
+            payload_copy["messages"] = self._sanitize_messages_for_logs(payload_copy["messages"])
+        return payload_copy
+
+    def _response_headers_for_logs(self, response: Optional[requests.Response]) -> Dict[str, str]:
+        """Extract response headers useful for debugging provider-side failures."""
+        if response is None:
+            return {}
+        wanted = {
+            "content-type",
+            "x-request-id",
+            "request-id",
+            "cf-ray",
+            "server",
+            "openai-processing-ms",
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests",
+        }
+        selected: Dict[str, str] = {}
+        for key, value in response.headers.items():
+            if key.lower() in wanted:
+                selected[key] = value
+        return selected
+
     def generate(self, model: str, prompt: str, temperature: float = 0.0, max_tokens: int = 8096, include_seed=True, min_p = 0.1, system=None) -> str:
         """
         Generic chat-completion style call.  We allow an optional random seed block.
@@ -106,7 +191,8 @@ class APIClient:
                 messages = [{"role": "system", "content": random_seed_block}] + messages
 
         for attempt in range(self.max_retries):
-            response = {}
+            response: Optional[requests.Response] = None
+            payload: Dict[str, Any] = {}
             try:
                 # Build payload based on provider
                 if self.provider == "anthropic":
@@ -119,14 +205,18 @@ class APIClient:
                     }
                     if system_prompt:
                         payload["system"] = system_prompt
+
+                    if model == "claude-opus-4-7":
+                        del payload["temperature"] # temp not supported on claude opus 4.7
+
                     # Disable reasoning/thinking for Anthropic models
                     payload["thinking"] = {"type": "disabled"}
-                    if model == "claude-opus-4-5-20251101":
-                        print('enable thinking for opus 4.5')
-                        payload["thinking"] = {
-                            "type": "enabled",
-                            "budget_tokens": 4096 
-                        }
+                    #if model == "claude-opus-4-5-20251101":
+                    #    print('enable thinking for opus 4.5')
+                    #    payload["thinking"] = {
+                    #        "type": "enabled",
+                    #        "budget_tokens": 4096 
+                    #    }
                 else:
                     # OpenAI format
                     payload = {
@@ -196,6 +286,14 @@ class APIClient:
                     if 'openrouter' in self.base_url and model.startswith('anthropic'):
                         payload["reasoning"] = {"max_tokens": 0}
 
+                    # Disable reasoning for all openrouter models
+                    if 'openrouter' in self.base_url:
+                        payload["reasoning"] = {"enabled": False}
+
+                    if model == 'google/gemini-3.1-pro-preview':
+                        print('gemini 3.1 pro minimal reasoning')
+                        payload["reasoning"] = {"effort": "minimal"}
+
                 response = requests.post(
                     self.base_url,
                     headers=self.headers,
@@ -225,10 +323,31 @@ class APIClient:
             except requests.exceptions.Timeout:
                 logging.warning(f"Request timed out on attempt {attempt+1}/{self.max_retries}")
             except requests.exceptions.HTTPError as e:
-                logging.error(e)
-                if response:
-                    print(response)
-                if e.response.status_code == 429:
+                error_response = e.response or response
+                details = self._extract_http_error_details(error_response)
+                payload_summary = self._summarize_payload_for_logs(payload)
+                payload_full = self._full_payload_for_logs(payload)
+                response_headers = self._response_headers_for_logs(error_response)
+                logging.error(
+                    "HTTP error on attempt %s/%s: %s",
+                    attempt + 1,
+                    self.max_retries,
+                    e,
+                )
+                logging.error("HTTP failure details: %s", json.dumps(details, ensure_ascii=True))
+                logging.error("Request summary: %s", json.dumps(payload_summary, ensure_ascii=True))
+                logging.error("Response headers: %s", json.dumps(response_headers, ensure_ascii=True))
+                logging.error("Request payload: %s", json.dumps(payload_full, ensure_ascii=True))
+                logging.error(
+                    "API_FAILURE provider=%s model=%s url=%s status=%s reason=%s response=%s",
+                    self.provider,
+                    payload.get("model"),
+                    self.base_url,
+                    details.get("status_code"),
+                    details.get("reason"),
+                    json.dumps(details.get("error") if details.get("error") is not None else details.get("body_preview"), ensure_ascii=True),
+                )
+                if (error_response is not None) and error_response.status_code == 429:
                     logging.warning("Rate limit. Backing off.")
                     time.sleep(self.retry_delay * (attempt + 1))
                     continue
@@ -239,7 +358,5 @@ class APIClient:
             time.sleep(self.retry_delay)
 
         raise RuntimeError(f"Failed to generate text after {self.max_retries} attempts")
-
-
 
 
