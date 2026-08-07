@@ -18,6 +18,9 @@ tqdm
 # For calculating Elo ratings using the Glicko-2 system
 glicko2
 
+# For the TrueSkill rating solver (core/trueskill_solver_cw.py)
+trueskill
+
 # For natural language processing tasks (tokenization, syllable counting)
 nltk
 
