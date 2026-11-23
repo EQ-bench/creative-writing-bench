@@ -26,7 +26,7 @@ def interpret_pairwise_result_cw(result_dict: Optional[Dict[str, str]]) -> Tuple
     a_score = 0
     b_score = 0
     for key, val in result_dict.items():
-        if key in ["improvement_suggestions", "theory_of_mind", "_item_order_idx"]: # Added _item_order_idx
+        if key in ["chain_of_thought_reasoning", "improvement_suggestions", "theory_of_mind", "_item_order_idx"]: # Added _item_order_idx
             continue
         # "A0493" => means model A is better for that dimension
         if "A0493" in val: # Model A preferred
